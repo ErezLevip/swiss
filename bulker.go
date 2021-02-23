@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-type MessagesBulker struct {
+type messagesBulker struct {
 	maxIntervalTime time.Duration
 	limit           int
 	bulk            bulk
@@ -19,33 +19,32 @@ type bulk struct {
 	messages entities.Messages
 }
 
-func (b *MessagesBulker) Add(msg *entities.Message) bool {
+func (b *messagesBulker) addOrTake(msg *entities.Message) (entities.Messages, bool) {
 	b.m.Lock()
 	defer b.m.Unlock()
-
-	if b.bulk.messages == nil || len(b.bulk.messages) == b.limit {
-		b.bulk.messages = make(entities.Messages, 0, b.limit)
-		b.t.Reset(b.maxIntervalTime)
-	}
-
 	b.bulk.messages = append(b.bulk.messages, msg)
-	return len(b.bulk.messages) >= b.limit
-}
 
-func (b *MessagesBulker) Take(flushAll bool) (entities.Messages, bool) {
-	b.m.Lock()
-	defer b.m.Unlock()
-	if len(b.bulk.messages) >= b.limit || (len(b.bulk.messages) > 0 && flushAll) {
-		out := b.bulk.messages
-		b.bulk.messages = make(entities.Messages, 0, b.limit)
-		b.t.Reset(b.maxIntervalTime)
-		return out, true
+	if len(b.bulk.messages) >= b.limit {
+		return b.takeUnsafe(), true
 	}
 	return nil, false
 }
 
-func NewMessageBulker(ctx context.Context, maxInterval time.Duration, limit int, flushFunc func(messages entities.Messages)) *MessagesBulker {
-	b := &MessagesBulker{
+func (b *messagesBulker) takeUnsafe() entities.Messages {
+	out := b.bulk.messages
+	b.bulk.messages = make(entities.Messages, 0, b.limit)
+	b.t.Reset(b.maxIntervalTime)
+	return out
+}
+
+func (b *messagesBulker) takeSafe() entities.Messages {
+	b.m.Lock()
+	defer b.m.Unlock()
+	return b.takeUnsafe()
+}
+
+func newMessageBulker(ctx context.Context, maxInterval time.Duration, limit int, flushFunc func(messages entities.Messages)) *messagesBulker {
+	b := &messagesBulker{
 		maxIntervalTime: maxInterval,
 		limit:           limit,
 	}
@@ -63,18 +62,15 @@ func NewMessageBulker(ctx context.Context, maxInterval time.Duration, limit int,
 	return b
 }
 
-func runTicker(ctx context.Context, b *MessagesBulker, flushFunc func(messages entities.Messages)) {
+func runTicker(ctx context.Context, b *messagesBulker, flushFunc func(messages entities.Messages)) {
 	for {
 		select {
 		case <-ctx.Done():
 			b.t.Stop()
 			return
 		case <-b.t.C:
-			messages, ok := b.Take(true)
-			if ok {
-				flushFunc(messages)
-				b.t.Reset(b.maxIntervalTime)
-			}
+			flushFunc(b.takeSafe())
+			b.t.Reset(b.maxIntervalTime)
 		}
 	}
 }

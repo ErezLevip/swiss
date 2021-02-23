@@ -80,13 +80,11 @@ func (ec *EventsConsumer) executeListener(ctx *executionContext) {
 
 func (ec *EventsConsumer) handleTopic(t string, c listeners.ConsumerOutChannel, execContext *executionContext) {
 	concurrency := ec.listener.ConsumerConfig().Concurrency
-	isConcurrent := concurrency > 0
 	sem := make(chan struct{}, concurrency)
-
 	flushFunc := func(bulk entities.Messages) {
 		ec.handleBulk(bulk, execContext, t)
 	}
-	bulker := NewMessageBulker(execContext, ec.listener.ConsumerConfig().BulkMaxInterval, ec.listener.ConsumerConfig().BulkSize, flushFunc)
+	bulker := newMessageBulker(execContext, ec.listener.ConsumerConfig().BulkMaxInterval, ec.listener.ConsumerConfig().BulkSize, flushFunc)
 
 	for {
 		select {
@@ -95,21 +93,14 @@ func (ec *EventsConsumer) handleTopic(t string, c listeners.ConsumerOutChannel, 
 				return
 			}
 
-			if isConcurrent {
-				sem <- struct{}{}
-			}
+			sem <- struct{}{}
 			go func(m *entities.Message) {
-				if isConcurrent {
-					defer func() {
-						<-sem
-					}()
-				}
+				defer func() {
+					<-sem
+				}()
 
-				if bulker.Add(m) {
-					bulk, ready := bulker.Take(false)
-					if ready {
-						ec.handleBulk(bulk, execContext, t)
-					}
+				if bulk, ready := bulker.addOrTake(m); ready {
+					ec.handleBulk(bulk, execContext, t)
 				}
 			}(m)
 
